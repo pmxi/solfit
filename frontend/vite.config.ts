@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => {
   const isProduction = mode === 'production'
 
   return {
-    base: isProduction ? '/starkhacks/' : '/',
+    base: isProduction ? '/solfit/' : '/',
     plugins: [
       figmaAssetResolver(),
       // The React and Tailwind plugins are both required for Make, even if
