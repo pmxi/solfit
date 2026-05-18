@@ -18,7 +18,8 @@ import {
   type PhantomWallet,
 } from '../lib/contest';
 
-const SERVER_URL = 'http://localhost:3001';
+const DEFAULT_SERVER_URL = import.meta.env.DEV ? 'http://localhost:3001' : undefined;
+const SERVER_URL = (import.meta.env.VITE_SERVER_URL as string | undefined) || DEFAULT_SERVER_URL;
 const ESP_ID = import.meta.env.VITE_ESP_ID as string | undefined;
 
 export interface Player {
@@ -113,6 +114,13 @@ const DEFAULT_STATS: Stats = {
   gamesPlayed: 0,
 };
 
+function requireServerUrl(): string {
+  if (!SERVER_URL) {
+    throw new Error('Game server is not configured for this deployment');
+  }
+  return SERVER_URL;
+}
+
 export function GameProvider({ children }: { children: React.ReactNode }) {
   const { user, logout: auth0Logout } = useAuth0();
 
@@ -158,7 +166,19 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   // Initialize socket once
   useEffect(() => {
-    const s = io(SERVER_URL, { reconnection: true, reconnectionDelay: 1000 });
+    if (!SERVER_URL) {
+      setSocket(null);
+      return;
+    }
+
+    let s: Socket;
+    try {
+      s = io(SERVER_URL, { reconnection: true, reconnectionDelay: 1000 });
+    } catch (e) {
+      cerror('socket', 'failed to initialize', e);
+      setSocket(null);
+      return;
+    }
 
     s.on('lobby-update', (updatedRoom: Room) => {
       setRoom(updatedRoom);
@@ -245,11 +265,12 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       durationSecs: number;
     }): Promise<Room> => {
       if (!wallet || !program) throw new Error('Connect Phantom wallet first');
+      const serverUrl = requireServerUrl();
       const walletPubkey = wallet.publicKey.toBase58();
       clog('createRoom', 'start', { ...opts, walletPubkey });
 
       // 1. Create socket room.
-      const res = await fetch(`${SERVER_URL}/api/rooms`, {
+      const res = await fetch(`${serverUrl}/api/rooms`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -311,9 +332,10 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const joinRoom = useCallback(
     async (code: string): Promise<Room> => {
       if (!wallet) throw new Error('Connect Phantom wallet first');
+      const serverUrl = requireServerUrl();
       const walletPubkey = wallet.publicKey.toBase58();
       clog('joinRoom', 'start', { code, walletPubkey });
-      const res = await fetch(`${SERVER_URL}/api/rooms/${code.toUpperCase()}`);
+      const res = await fetch(`${serverUrl}/api/rooms/${code.toUpperCase()}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         const msg = (err as { error?: string }).error || 'Room not found';
@@ -417,7 +439,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => {
     leaveRoom();
-    auth0Logout({ logoutParams: { returnTo: window.location.origin + '/auth' } });
+    auth0Logout({
+      logoutParams: {
+        returnTo: new URL('auth', `${window.location.origin}${import.meta.env.BASE_URL}`).toString(),
+      },
+    });
   }, [leaveRoom, auth0Logout]);
 
   const isHost = room?.players.find(p => p.id === playerId)?.isHost ?? false;
