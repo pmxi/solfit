@@ -1,4 +1,5 @@
 import { PublicKey, Transaction } from "@solana/web3.js";
+import { clog, cerror } from "./log";
 
 /**
  * Minimal Phantom wallet adapter matching @coral-xyz/anchor's Wallet interface.
@@ -26,18 +27,27 @@ declare global {
 }
 
 export async function connectPhantom(): Promise<PhantomWallet> {
+  clog("wallet", "connectPhantom: requesting connection…");
   if (!window.solana?.isPhantom) {
+    cerror("wallet", "connectPhantom: window.solana.isPhantom is falsy");
     throw new Error("Phantom wallet not found. Install from phantom.app.");
   }
-  const resp = await window.solana.connect();
-  const publicKey = new PublicKey(resp.publicKey.toBytes());
-  return {
-    publicKey,
-    signTransaction: (tx) => window.solana!.signTransaction(tx),
-    signAllTransactions: (txs) => window.solana!.signAllTransactions(txs),
-  };
+  try {
+    const resp = await window.solana.connect();
+    const publicKey = new PublicKey(resp.publicKey.toBytes());
+    clog("wallet", "connectPhantom: connected", publicKey.toBase58());
+    return {
+      publicKey,
+      signTransaction: (tx) => window.solana!.signTransaction(tx),
+      signAllTransactions: (txs) => window.solana!.signAllTransactions(txs),
+    };
+  } catch (e: any) {
+    cerror("wallet", "connectPhantom: connect() rejected", e?.message ?? e);
+    throw e;
+  }
 }
 
 export async function disconnectPhantom(): Promise<void> {
+  clog("wallet", "disconnectPhantom");
   await window.solana?.disconnect();
 }

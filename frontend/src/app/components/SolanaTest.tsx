@@ -6,6 +6,7 @@ import {
   createContest,
   getDevJudge,
   getProgram,
+  isAlreadyProcessed as isAlreadyProcessedShared,
   joinContest,
   settleWithDevJudge,
   type PhantomWallet,
@@ -41,8 +42,7 @@ export default function SolanaTest() {
 
   const program = wallet ? getProgram(wallet) : null;
 
-  const isAlreadyProcessed = (e: any) =>
-    String(e?.message ?? e).toLowerCase().includes("already been processed");
+  const isAlreadyProcessed = isAlreadyProcessedShared;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {

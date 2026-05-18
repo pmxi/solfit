@@ -1,3 +1,4 @@
+export { clog, cwarn, cerror, isAlreadyProcessed } from "./log";
 export { PROGRAM_ID, contestPda } from "./pda";
 export { serializeScoresMessage } from "./message";
 export { getDevJudge } from "./devJudge";

@@ -101,22 +101,26 @@ app.get('/health', (_, res) => res.json({ ok: true, rooms: rooms.size, users: us
 // ── Judge endpoints ──────────────────────────────────────
 
 app.get('/api/judge-pubkey', (_req, res) => {
+  console.log('[judge] /api/judge-pubkey served', judgePubkeyBase58);
   res.json({ publicKey: judgePubkeyBase58 });
 });
 
 app.post('/api/sign', (req, res) => {
   const { messageBase64 } = req.body;
   if (!messageBase64 || typeof messageBase64 !== 'string') {
+    console.warn('[judge] /api/sign rejected: missing messageBase64');
     return res.status(400).json({ error: 'messageBase64 required' });
   }
   try {
     const msg = Buffer.from(messageBase64, 'base64');
     const sig = nacl.sign.detached(new Uint8Array(msg), judge.secretKey);
+    console.log(`[judge] /api/sign signed ${msg.length}-byte message`);
     res.json({
       signatureBase64: Buffer.from(sig).toString('base64'),
       publicKey: judgePubkeyBase58,
     });
   } catch (e) {
+    console.error('[judge] /api/sign error:', e);
     res.status(400).json({ error: String(e) });
   }
 });

@@ -6,7 +6,7 @@ import { PublicKey } from '@solana/web3.js';
 import confetti from 'canvas-confetti';
 import { useGame } from '../../context/GameContext';
 import { PlayerAvatar } from './PlayerAvatar';
-import { settleWithJudgeServer } from '../../lib/contest';
+import { clog, cerror, isAlreadyProcessed, settleWithJudgeServer } from '../../lib/contest';
 
 interface ResultPlayer {
   id: string;
@@ -79,10 +79,16 @@ export default function GameResults() {
     (async () => {
       setOnchainStatus('settling');
       setOnchainError('');
+      clog('GameResults', 'settle effect: fetching contest', { pda });
       try {
         const contestPk = new PublicKey(pda);
         // @ts-expect-error — anchor's dynamic account access
         const contest: any = await program.account.contest.fetch(contestPk);
+        clog('GameResults', 'settle effect: contest state', {
+          status: Number(contest.status),
+          players: contest.players.map((p: PublicKey) => p.toBase58()),
+          deadline: contest.deadline?.toString?.(),
+        });
 
         // Align scores with contest.players order (by walletPubkey).
         const scores: number[] = contest.players.map((walletPk: PublicKey) => {
@@ -99,19 +105,25 @@ export default function GameResults() {
           if (scores[i] > scores[winnerIdx]) winnerIdx = i;
         }
         const winnerPk = contest.players[winnerIdx] as PublicKey;
+        clog('GameResults', 'settle effect: computed scores + winner', {
+          scores,
+          winner: winnerPk.toBase58(),
+        });
 
         await settleWithJudgeServer(program, contestPk, scores, winnerPk);
         setWinnerPubkey(winnerPk.toBase58());
         setOnchainStatus('settled');
       } catch (e: any) {
-        const msg = String(e?.message ?? e);
-        if (msg.toLowerCase().includes('already been processed')) {
+        if (isAlreadyProcessed(e)) {
+          clog('GameResults', 'settle retry hit already-processed; treating as success');
           setOnchainStatus('settled');
-        } else {
-          setOnchainError(msg);
-          setOnchainStatus('error');
-          settledRef.current = false; // allow retry
+          return;
         }
+        const msg = String(e?.message ?? e);
+        cerror('GameResults', 'settle failed', msg);
+        setOnchainError(msg);
+        setOnchainStatus('error');
+        settledRef.current = false; // allow retry
       }
     })();
   }, [room?.contestPda, room?.players, program, wallet, isHost, rawResults]);

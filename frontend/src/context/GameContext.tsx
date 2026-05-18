@@ -5,11 +5,15 @@ import { BN, type Program } from '@coral-xyz/anchor';
 import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import type { Solfit } from '../idl/solfit';
 import {
+  clog,
+  cerror,
   connectPhantom,
+  contestPda as deriveContestPda,
   createContest,
   disconnectPhantom,
   getJudgePubkey,
   getProgram,
+  isAlreadyProcessed,
   joinContest,
   type PhantomWallet,
 } from '../lib/contest';
@@ -204,11 +208,14 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const program = useMemo(() => (wallet ? getProgram(wallet) : null), [wallet]);
 
   const connectWallet = useCallback(async () => {
+    clog('GameContext', 'connectWallet invoked');
     const w = await connectPhantom();
     setWallet(w);
+    clog('GameContext', 'wallet stored in context', w.publicKey.toBase58());
   }, []);
 
   const disconnectWallet = useCallback(async () => {
+    clog('GameContext', 'disconnectWallet invoked');
     await disconnectPhantom();
     setWallet(null);
   }, []);
@@ -239,6 +246,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     }): Promise<Room> => {
       if (!wallet || !program) throw new Error('Connect Phantom wallet first');
       const walletPubkey = wallet.publicKey.toBase58();
+      clog('createRoom', 'start', { ...opts, walletPubkey });
 
       // 1. Create socket room.
       const res = await fetch(`${SERVER_URL}/api/rooms`, {
@@ -255,6 +263,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       if (!res.ok) throw new Error('Failed to create room');
       const data = await res.json();
       const newRoom = data.room as Room;
+      clog('createRoom', 'socket room created', { code: newRoom.code });
       setRoom(newRoom);
       socket?.emit('join-room', {
         code: newRoom.code,
@@ -267,14 +276,31 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       const idBytes = new Uint8Array(8);
       crypto.getRandomValues(idBytes);
       const contestId = new BN(idBytes);
-      const { contestPda } = await createContest(program, {
-        contestId,
-        wagerLamports: new BN(Math.round(opts.wagerSol * LAMPORTS_PER_SOL)),
-        maxPlayers: opts.maxPlayers,
-        durationSecs: opts.durationSecs,
-        judge: judgePubkey,
-      });
-      const pdaStr = contestPda.toBase58();
+      // Derive PDA up front so we know where we're aiming even if web3.js's
+      // retry layer throws "already processed" after the first send landed.
+      const expectedPda = deriveContestPda(wallet.publicKey, contestId);
+      let pda = expectedPda;
+      try {
+        const result = await createContest(program, {
+          contestId,
+          wagerLamports: new BN(Math.round(opts.wagerSol * LAMPORTS_PER_SOL)),
+          maxPlayers: opts.maxPlayers,
+          durationSecs: opts.durationSecs,
+          judge: judgePubkey,
+        });
+        pda = result.contestPda;
+      } catch (e) {
+        if (isAlreadyProcessed(e)) {
+          clog('createRoom', 'createContest retry hit already-processed; first send landed', {
+            pda: expectedPda.toBase58(),
+          });
+        } else {
+          cerror('createRoom', 'createContest failed', e);
+          throw e;
+        }
+      }
+      const pdaStr = pda.toBase58();
+      clog('createRoom', 'contest ready', { pda: pdaStr });
       socket?.emit('set-contest-pda', { code: newRoom.code, contestPda: pdaStr });
       setRoom(prev => (prev ? { ...prev, contestPda: pdaStr } : prev));
       return { ...newRoom, contestPda: pdaStr };
@@ -286,12 +312,20 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     async (code: string): Promise<Room> => {
       if (!wallet) throw new Error('Connect Phantom wallet first');
       const walletPubkey = wallet.publicKey.toBase58();
+      clog('joinRoom', 'start', { code, walletPubkey });
       const res = await fetch(`${SERVER_URL}/api/rooms/${code.toUpperCase()}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error((err as { error?: string }).error || 'Room not found');
+        const msg = (err as { error?: string }).error || 'Room not found';
+        cerror('joinRoom', 'HTTP fetch failed', res.status, msg);
+        throw new Error(msg);
       }
       const existingRoom = (await res.json()) as Room;
+      clog('joinRoom', 'fetched room', {
+        code: existingRoom.code,
+        contestPda: existingRoom.contestPda,
+        players: existingRoom.players.length,
+      });
       setRoom(existingRoom);
       socket?.emit('join-room', {
         code: code.toUpperCase(),
@@ -308,19 +342,40 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const pda = room?.contestPda;
-    if (!pda || !program || !wallet) return;
-    if (joinedContestRef.current === pda) return;
+    if (!pda || !program || !wallet) {
+      clog('autoJoin', 'effect: not ready', {
+        pda: pda ?? null,
+        hasProgram: !!program,
+        hasWallet: !!wallet,
+      });
+      return;
+    }
+    if (joinedContestRef.current === pda) {
+      clog('autoJoin', 'effect: already attempted for this pda', pda);
+      return;
+    }
     joinedContestRef.current = pda;
+    clog('autoJoin', 'effect: attempting joinContest', {
+      pda,
+      player: wallet.publicKey.toBase58(),
+    });
 
     (async () => {
       try {
         await joinContest(program, new PublicKey(pda));
+        clog('autoJoin', 'joinContest success', { pda });
       } catch (e: any) {
         const msg = String(e?.message ?? e);
-        // Already-joined and already-processed are both fine — we got in.
-        if (msg.includes('AlreadyJoined') || msg.toLowerCase().includes('already been processed')) return;
-        joinedContestRef.current = null; // allow retry on next contestPda change
-        console.error('joinContest failed:', msg);
+        if (msg.includes('AlreadyJoined')) {
+          clog('autoJoin', 'already joined on chain — OK', { pda });
+          return;
+        }
+        if (isAlreadyProcessed(e)) {
+          clog('autoJoin', 'tx retried; first send landed — OK', { pda });
+          return;
+        }
+        cerror('autoJoin', 'joinContest failed (will retry on next pda change)', msg);
+        joinedContestRef.current = null; // allow retry
       }
     })();
   }, [room?.contestPda, program, wallet]);
@@ -342,10 +397,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const emitStartGame = useCallback((settings: GameSettings) => {
     const r = roomRef.current;
     if (!r || !socket) return;
-    // Reset the ESP's rep counter at the start of a new match, if connected.
     if (espSocketRef.current?.readyState === WebSocket.OPEN) {
+      clog('emitStartGame', 'sending RESET to ESP');
       espSocketRef.current.send('RESET');
     }
+    clog('emitStartGame', 'socket start-game', { code: r.code, settings });
     socket.emit('start-game', { code: r.code, settings });
   }, [socket]);
 
