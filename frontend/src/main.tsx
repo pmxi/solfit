@@ -9,12 +9,14 @@ import { GameProvider } from './context/GameContext.tsx';
 import { AUTH0_DOMAIN, AUTH0_CLIENT_ID } from './config.ts';
 import './styles/index.css';
 
+const appBaseUrl = `${window.location.origin}${import.meta.env.BASE_URL}`;
+
 createRoot(document.getElementById('root')!).render(
   <Auth0Provider
     domain={AUTH0_DOMAIN}
     clientId={AUTH0_CLIENT_ID}
     authorizationParams={{
-      redirect_uri: `${window.location.origin}/callback`,
+      redirect_uri: new URL('callback', appBaseUrl).toString(),
       // Request offline_access so Auth0 issues refresh tokens
       scope: 'openid profile email offline_access',
     }}
