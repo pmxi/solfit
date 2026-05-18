@@ -20,7 +20,11 @@ import {
 
 const DEFAULT_SERVER_URL = import.meta.env.DEV ? 'http://localhost:3001' : undefined;
 const SERVER_URL = (import.meta.env.VITE_SERVER_URL as string | undefined) || DEFAULT_SERVER_URL;
-const ESP_ID = import.meta.env.VITE_ESP_ID as string | undefined;
+const DEV_ESP_WS_URL =
+  import.meta.env.DEV && import.meta.env.VITE_ESP_ID
+    ? `ws://${import.meta.env.VITE_ESP_ID}/ws`
+    : undefined;
+const ESP_WS_URL = (import.meta.env.VITE_ESP_WS_URL as string | undefined) || DEV_ESP_WS_URL;
 
 export interface Player {
   id: string;
@@ -77,7 +81,7 @@ interface GameContextType {
   setRoom: (room: Room | null) => void;
   socket: Socket | null;
   isHost: boolean;
-  // ESP32 rep sensor (optional; only wired if VITE_ESP_ID is set)
+  // ESP32 rep sensor (optional; production requires VITE_ESP_WS_URL)
   espSocket: WebSocket | null;
   espConnected: boolean;
   // Incoming game invite from a friend
@@ -197,14 +201,32 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Open a persistent WebSocket to the ESP32 rep sensor, if one is configured.
-  // If VITE_ESP_ID is unset, the integration is a no-op — MediaPipe still works.
+  // In production this is opt-in with VITE_ESP_WS_URL, so local ESP settings
+  // cannot break the static GitHub Pages frontend.
   useEffect(() => {
-    if (!ESP_ID) {
+    if (!ESP_WS_URL) {
       setEspSocket(null);
       setEspConnected(false);
       return;
     }
-    const ws = new WebSocket(`ws://${ESP_ID}/ws`);
+
+    if (window.location.protocol === 'https:' && ESP_WS_URL.startsWith('ws://')) {
+      cerror('esp', 'refusing insecure ESP WebSocket on HTTPS', ESP_WS_URL);
+      setEspSocket(null);
+      setEspConnected(false);
+      return;
+    }
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(ESP_WS_URL);
+    } catch (e) {
+      cerror('esp', 'failed to initialize ESP WebSocket', e);
+      setEspSocket(null);
+      setEspConnected(false);
+      return;
+    }
+
     espSocketRef.current = ws;
     setEspSocket(ws);
     ws.addEventListener('open', () => setEspConnected(true));
